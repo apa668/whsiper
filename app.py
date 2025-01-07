@@ -14,7 +14,7 @@ def initialize_whisper_pipeline():
     """Initialize the Whisper model pipeline"""
     try:
         # Using smaller model better suited for CPU
-        model_id = "openai/whisper-small"
+        model_id = "openai/whisper-medium"
         
         # Set device and dtype
         device = "cpu"
