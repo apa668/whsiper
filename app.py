@@ -1,68 +1,73 @@
 import streamlit as st
-from streamlit_mic_recorder import speech_to_text
 from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
 import torch
+from io import BytesIO
+import wave
+import numpy as np
 
-# Load Whisper model
+# Set up device and model
+st.title("Audio Transcription App")
+
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+model_id = "openai/whisper-large-v3-turbo"
+
 @st.cache_resource
-def load_whisper_model():
-    model_id = "openai/whisper-large-v2"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+def load_model():
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32
+        model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
     )
-    model.to(device)
     processor = AutoProcessor.from_pretrained(model_id)
-    return pipeline(
+    pipe = pipeline(
         "automatic-speech-recognition",
         model=model,
         tokenizer=processor.tokenizer,
         feature_extractor=processor.feature_extractor,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        device=0 if device == "cuda" else -1,
+        torch_dtype=torch_dtype,
+        device=device,
     )
+    return pipe
 
-# Record and process audio
-def record_voice(language="en"):
-    state = st.session_state
+pipe = load_model()
 
-    if "text_received" not in state:
-        state.text_received = []
+# Function to convert audio bytes to numpy array
+def read_audio(file):
+    with wave.open(file, "rb") as wav_file:
+        frames = wav_file.readframes(wav_file.getnframes())
+        audio = np.frombuffer(frames, dtype=np.int16)
+        return audio, wav_file.getframerate()
 
-    # Record and transcribe using streamlit-mic-recorder
-    text = speech_to_text(
-        start_prompt="🎤 Click and speak to record audio",
-        stop_prompt="⚠️ Stop recording 🚨",
-        language=language,
-        use_container_width=True,
-        just_once=True,
-    )
+# Option to record audio (using streamlit-audiorecorder-like functionality)
+if "audio_data" not in st.session_state:
+    st.session_state["audio_data"] = None
 
-    if text:
-        state.text_received.append(text)
+def record_audio():
+    st.session_state["audio_data"] = st.audio("audio/record")
 
-    result = "".join(state.text_received)
-    state.text_received = []  # Clear the state after use
-    return result if result else None
+# Audio recording or uploading
+st.header("Record or Upload Audio")
+option = st.radio("Choose an option:", ("Record", "Upload"))
 
+if option == "Record":
+    if st.button("Start Recording"):
+        record_audio()
+    audio_file = st.session_state["audio_data"]
+elif option == "Upload":
+    audio_file = st.file_uploader("Upload an audio file (MP3/WAV):", type=["wav", "mp3"])
 
-# Main App
-st.title("Streamlit Voice Recorder and Transcription")
+# Transcription
+if audio_file:
+    st.audio(audio_file, format="audio/wav")
+    st.write("Processing audio...")
 
-st.write("Record your voice and get a transcription using Whisper or streamlit-mic-recorder.")
+    if isinstance(audio_file, BytesIO):
+        audio_bytes = BytesIO(audio_file.read())
+    else:
+        audio_bytes = audio_file
 
-# Record voice
-transcribed_text = record_voice(language="en")
+    audio_data, sample_rate = read_audio(audio_bytes)
 
-if transcribed_text:
-    st.write("Transcribed Text (from streamlit-mic-recorder):")
-    st.success(transcribed_text)
-
-    # Optional: Process text using Whisper
-    use_whisper = st.checkbox("Use Whisper for transcription (optional)")
-    if use_whisper:
-        st.write("Processing with Whisper...")
-        whisper_pipeline = load_whisper_model()
-        result = whisper_pipeline(transcribed_text)
-        st.write("Transcription (Whisper):")
-        st.success(result["text"])
+    result = pipe({"array": audio_data, "sampling_rate": sample_rate})
+    st.write("**Transcription:**")
+    st.text(result["text"])
