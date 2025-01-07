@@ -1,73 +1,55 @@
+import os
 import streamlit as st
 from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
-import torch
-from io import BytesIO
-import wave
 import numpy as np
+import torchaudio
 
-# Set up device and model
-st.title("Audio Transcription App")
+# Install ffmpeg during deployment
+os.system("apt-get update && apt-get install -y ffmpeg")
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-model_id = "openai/whisper-large-v3-turbo"
-
+# Function to load the Whisper model
 @st.cache_resource
 def load_model():
+    model_id = "openai/whisper-large-v2"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
+        model_id,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        low_cpu_mem_usage=True,
     )
+    model.to(device)
     processor = AutoProcessor.from_pretrained(model_id)
-    pipe = pipeline(
+    return pipeline(
         "automatic-speech-recognition",
         model=model,
         tokenizer=processor.tokenizer,
         feature_extractor=processor.feature_extractor,
-        torch_dtype=torch_dtype,
-        device=device,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        device=0 if device == "cuda" else -1,
     )
-    return pipe
 
-pipe = load_model()
+# Preprocess audio to ensure it's in the correct format
+def preprocess_audio(audio_bytes):
+    waveform, sample_rate = torchaudio.load(audio_bytes)
+    if sample_rate != 16000:
+        waveform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)(waveform)
+    return waveform
 
-# Function to convert audio bytes to numpy array
-def read_audio(file):
-    with wave.open(file, "rb") as wav_file:
-        frames = wav_file.readframes(wav_file.getnframes())
-        audio = np.frombuffer(frames, dtype=np.int16)
-        return audio, wav_file.getframerate()
+# Main Streamlit App
+st.title("Whisper Audio Transcription App")
 
-# Option to record audio (using streamlit-audiorecorder-like functionality)
-if "audio_data" not in st.session_state:
-    st.session_state["audio_data"] = None
+st.write("Record your audio and get a transcription using OpenAI's Whisper model.")
 
-def record_audio():
-    st.session_state["audio_data"] = st.audio("audio/record")
-
-# Audio recording or uploading
-st.header("Record or Upload Audio")
-option = st.radio("Choose an option:", ("Record", "Upload"))
-
-if option == "Record":
-    if st.button("Start Recording"):
-        record_audio()
-    audio_file = st.session_state["audio_data"]
-elif option == "Upload":
-    audio_file = st.file_uploader("Upload an audio file (MP3/WAV):", type=["wav", "mp3"])
-
-# Transcription
-if audio_file:
-    st.audio(audio_file, format="audio/wav")
-    st.write("Processing audio...")
-
-    if isinstance(audio_file, BytesIO):
-        audio_bytes = BytesIO(audio_file.read())
-    else:
-        audio_bytes = audio_file
-
-    audio_data, sample_rate = read_audio(audio_bytes)
-
-    result = pipe({"array": audio_data, "sampling_rate": sample_rate})
-    st.write("**Transcription:**")
-    st.text(result["text"])
+# Audio Recorder
+audio_data = st.audio("Record your audio here:", type="wav")
+if audio_data is not None:
+    st.write("Recording received. Processing...")
+    try:
+        # Preprocess and transcribe
+        processed_audio = preprocess_audio(audio_data)
+        pipe = load_model()
+        result = pipe(processed_audio)
+        st.write("Transcription:")
+        st.success(result["text"])
+    except Exception as e:
+        st.error(f"An error occurred while processing the audio: {e}")
