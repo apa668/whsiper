@@ -1,8 +1,9 @@
 streamlit
-streamlit_audio_recorder
+streamlit-webrtc
 transformers>=4.26.0
 torch
 torchaudio
 numpy
 ffmpeg-python
 accelerate>=0.26.0
+av
