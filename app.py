@@ -3,6 +3,7 @@ import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 import tempfile
 import os
+import gc
 import logging
 
 # Configure logging
@@ -12,28 +13,34 @@ logger = logging.getLogger(__name__)
 def initialize_whisper_pipeline():
     """Initialize the Whisper model pipeline"""
     try:
-        model_id = "openai/whisper-large-v3"
+        # Using smaller model better suited for CPU
+        model_id = "openai/whisper-small"
         
         # Set device and dtype
-        device = "cpu"  # Streamlit Cloud uses CPU
-        torch_dtype = torch.float32  # Use float32 for CPU
+        device = "cpu"
+        torch_dtype = torch.float32
         
         st.info("Starting model initialization...")
         
-        # Load model with optimized settings
+        # Load model with memory optimizations
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=True,
             use_safetensors=True,
-            device_map=None  # Explicitly set to None for CPU
+            device_map=None
         )
+        
+        # Clear memory
+        gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
         st.info("Model loaded successfully...")
         
         processor = AutoProcessor.from_pretrained(model_id)
         st.info("Processor loaded successfully...")
         
-        # Create pipeline
+        # Create pipeline with memory efficient settings
         pipe = pipeline(
             "automatic-speech-recognition",
             model=model,
@@ -41,6 +48,8 @@ def initialize_whisper_pipeline():
             feature_extractor=processor.feature_extractor,
             torch_dtype=torch_dtype,
             device=device,
+            chunk_length_s=30,  # Process audio in smaller chunks
+            batch_size=1
         )
         st.info("Pipeline created successfully...")
         
@@ -51,17 +60,28 @@ def initialize_whisper_pipeline():
         st.error(f"Error initializing model: {str(e)}")
         raise
 
+def transcribe_audio(pipe, audio_path):
+    """Transcribe audio file with progress tracking"""
+    try:
+        return pipe(
+            audio_path,
+            return_timestamps=False,
+            generate_kwargs={"max_new_tokens": 256}
+        )
+    except Exception as e:
+        logger.error(f"Transcription error: {str(e)}")
+        raise
+
 def main():
     st.title("🎙️ Audio Transcription App")
     st.write("Upload an audio file (MP3, WAV, M4A, or OGG) and get its transcription!")
     
-    # Add system info
-    st.sidebar.write("### System Information")
-    st.sidebar.write(f"PyTorch Version: {torch.__version__}")
-    st.sidebar.write(f"CUDA Available: {torch.cuda.is_available()}")
-    st.sidebar.write(f"Device Being Used: CPU")
+    # Memory usage warning
+    st.warning("""Note: This app uses the 'whisper-small' model for better compatibility with Streamlit Cloud. 
+                While transcription quality might be slightly lower than the large model, it should work more reliably.""")
     
-    # File upload
+    # File upload with size limit
+    st.info("Please keep audio files under 4 minutes for best results")
     audio_file = st.file_uploader("Choose an audio file", type=['mp3', 'wav', 'm4a', 'ogg'])
     
     if audio_file is not None:
@@ -77,7 +97,12 @@ def main():
                 
                 st.info("Starting transcription...")
                 # Perform transcription
-                result = pipe(tmp_file_path)
+                result = transcribe_audio(pipe, tmp_file_path)
+                
+                # Clear memory
+                del pipe
+                gc.collect()
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
                 
                 # Display results
                 st.success("Transcription completed!")
@@ -111,7 +136,10 @@ def main():
         3. View the transcription results
         4. Download the transcription as a text file if needed
         
-        Note: This app works best with clear audio recordings. Background noise may affect accuracy.
+        Note: 
+        - Keep audio files under 4 minutes for best results
+        - Clear audio recordings work best
+        - Background noise may affect accuracy
         """)
     
     # Add footer
